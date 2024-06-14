@@ -1,3 +1,4 @@
+![image](https://github.com/johnwinifred/Building-a-Paymaster-to-Reward-Staking-in-zkSync/assets/89465179/4f312323-f6aa-4e84-9f41-c45c236d5702)
 ## Building a Paymaster to Reward Staking in zkSync
 ![Multipurpose blue Zoom Background Template - Made with PosterMyWall](https://github.com/johnwinifred/Building-a-Paymaster-to-Reward-Staking-in-zkSync/assets/89465179/8a4f4b7f-5a2a-4007-9893-ca74b2dcb208)
 
@@ -60,12 +61,19 @@ cd staking-reward-paymaster
 rm -rf ./contracts/*
 rm -rf ./deploy/*
 ```
+if you are running in PowerShell use this instead
+```bash
+Remove-Item -Recurse -Force ./contracts/*
+Remove-Item -Recurse -Force ./deploy/*
+```
 *Remove any example contracts and deploy scripts to start with a clean slate.*
 
 #### 1.4 Add Required Libraries:
 
 ```bash
 yarn add -D @matterlabs/zksync-contracts @openzeppelin/contracts@4.9.5
+yarn add --dev hardhat @nomiclabs/hardhat-waffle @nomiclabs/hardhat-ethers ethers @matterlabs/hardhat-zksync-deploy
+
 ```
 *Install the zkSync contracts and OpenZeppelin contracts libraries.*
 
@@ -131,9 +139,12 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 
 contract Staking is Ownable {
     IERC20 public stakingToken;
-
     mapping(address => uint256) public balances;
     mapping(address => uint256) public rewards;
+
+    event Staked(address indexed user, uint256 amount);
+    event Unstaked(address indexed user, uint256 amount);
+    event RewardSet(address indexed user, uint256 reward);
 
     constructor(IERC20 _stakingToken) {
         stakingToken = _stakingToken;
@@ -143,6 +154,7 @@ contract Staking is Ownable {
         require(amount > 0, "Amount must be greater than 0");
         stakingToken.transferFrom(msg.sender, address(this), amount);
         balances[msg.sender] += amount;
+        emit Staked(msg.sender, amount);
     }
 
     function unstake(uint256 amount) external {
@@ -150,6 +162,7 @@ contract Staking is Ownable {
         require(balances[msg.sender] >= amount, "Insufficient balance to unstake");
         balances[msg.sender] -= amount;
         stakingToken.transfer(msg.sender, amount);
+        emit Unstaked(msg.sender, amount);
     }
 
     function getReward(address account) external view returns (uint256) {
@@ -158,8 +171,10 @@ contract Staking is Ownable {
 
     function setReward(address account, uint256 reward) external onlyOwner {
         rewards[account] = reward;
+        emit RewardSet(account, reward);
     }
 }
+
 ```
 *This contract allows users to stake tokens, unstake them, and get rewards. The contract owner can set rewards for users.*
 
@@ -167,51 +182,51 @@ contract Staking is Ownable {
 
 Create a new file `StakingRewardPaymaster.sol` in the `contracts` directory and add the following code:
 
-```// SPDX-License-Identifier: MIT
+```
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.17;
 
+import "@matterlabs/zksync-contracts/l2/system-contracts/interfaces/IPaymaster.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract StakingRewardPaymaster is Ownable {
+contract StakingRewardPaymaster is IPaymaster, Ownable {
     IERC20 public allowedToken;
     address public stakingContract;
-    address public BOOTLOADER_FORMAL_ADDRESS; // Assuming this address is defined
 
-    modifier onlyBootloader() {
-        require(msg.sender == BOOTLOADER_FORMAL_ADDRESS, "Only bootloader can call this method");
-        _;
-    }
-
-    constructor(address _allowedToken, address _stakingContract, address _bootloaderAddress) {
+    constructor(address _allowedToken, address _stakingContract, address _zkSyncAddress) 
+        IPaymaster(_zkSyncAddress) 
+    {
         allowedToken = IERC20(_allowedToken);
         stakingContract = _stakingContract;
-        BOOTLOADER_FORMAL_ADDRESS = _bootloaderAddress;
-    }
-
-    function payForTransaction(address user) external onlyBootloader returns (bool) {
-        // Interact with the staking contract to determine if the user has rewards
-        // If the user has rewards, cover their transaction fees using allowedToken
-        // Return true if transaction fees are covered, false otherwise
     }
 
     function validateAndPayForPaymasterTransaction(
         bytes32,
         bytes32,
-        Transaction calldata _transaction
-    ) external payable onlyBootloader returns (bytes4 magic, bytes memory context) {
-        // Implement validation logic here
+        IPaymaster.Transaction calldata _transaction
+    ) external payable onlyOwner returns (bytes4 magic, bytes memory context) {
+        address user = _transaction.from;
+
+        (bool success, bytes memory result) = stakingContract.staticcall(
+            abi.encodeWithSignature("getReward(address)", user)
+        );
+        require(success, "Failed to query staking contract");
+
+        uint256 reward = abi.decode(result, (uint256));
+        require(reward > 0, "User has no staking rewards");
+
+        return (IPaymaster.PAYMASTER_SUCCESS(), "");
     }
 
     function postTransaction(
-        bytes calldata _context,
-        Transaction calldata _transaction,
+        bytes calldata,
+        IPaymaster.Transaction calldata _transaction,
         bytes32,
         bytes32,
-        ExecutionResult calldata _txResult,
-        uint256 _maxRefundedGas
-    ) external payable onlyBootloader {
-        // Implement post-transaction processing logic here
+        IPaymaster.ExecutionResult calldata,
+        uint256
+    ) external payable onlyOwner {
+        // Implement post-transaction processing logic here if needed
     }
 }
 
@@ -225,35 +240,19 @@ Create a new deploy script `deploy.ts` in the `deploy` directory:
 ```typescript
 import { ethers, network } from "hardhat";
 import { Deployer } from "@matterlabs/hardhat-zksync-deploy";
-import { Wallet } from "zksync-web3";
+import { Wallet } from "ethers";
+import { Provider } from "@matterlabs/hardhat-zksync-ethers";
 
 async function main() {
-  const deployer = new Deployer(network.provider);
+    const zkSyncProvider = new Provider("https://sepolia.era.zksync.dev");
+    const wallet = new Wallet("<YOUR_PRIVATE_KEY>", zkSyncProvider);
+    const deployer = new Deployer(network, wallet);
 
-  const [owner] = await ethers.getSigners();
-  console.log("Deploying contracts with the account:", owner.address);
+    const stakingArtifact = await deployer.loadArtifact("Staking");
+    const stakingContract = await deployer.deploy(stakingArtifact, [
+        "<STAKING_TOKEN_ADDRESS>", // Replace with the actual staking token address
+        100 // Reward
 
-  // Deploy Staking contract
-  const Staking = await deployer.deploy("Staking", {
-    args: ["<STAKING_TOKEN_ADDRESS>"], // Replace with the staking token address
-    from: owner.address,
-  });
-
-  console.log("Staking contract deployed to:", Staking.address);
-
-  // Deploy Paymaster contract
-  const StakingRewardPaymaster = await deployer.deploy("StakingRewardPaymaster", {
-    args: [Staking.address],
-    from: owner.address,
-  });
-
-  console.log("StakingRewardPaymaster deployed to:", StakingRewardPaymaster.address);
-}
-
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
 ```
 *This script deploys both the staking and paymaster contracts. Replace `<STAKING_TOKEN_ADDRESS>` with the actual staking token address.*
 
@@ -298,43 +297,52 @@ To send a transaction with the paymaster covering the fees, you would need to in
 
 ```typescript
 import { ethers } from "hardhat";
-import { Wallet, Provider } from "zksync-web3";
-
+import { Wallet, Provider } from "ethers";
 async function main() {
-  const provider = new Provider("https://sepolia.era.zksync.dev"); // zkSync testnet provider
+  const provider = new Provider("https://testnet.era.zksync.dev"); // zkSync testnet provider
   const [sender] = await ethers.getSigners();
-
-  const paymasterAddress = "<PAYMASTER_CONTRACT_ADDRESS>"; // Replace with the deployed paymaster contract address
-
-  // Example transaction to be sent
+const paymasterAddress = "<PAYMASTER_CONTRACT_ADDRESS>"; // Replace with the deployed paymaster contract address
+// Example transaction to be sent
   const tx = {
     to: "<RECIPIENT_ADDRESS>", // Replace with the recipient address
     value: ethers.utils.parseEther("0.01"), // Amount to send
     gasPrice: await provider.getGasPrice(),
     gasLimit: ethers.BigNumber.from("21000"), // Estimate gas limit for a simple transfer
-  };
-
-  // Sign and send the transaction using the paymaster
-  const signedTx = await sender.sendTransaction({
-    ...tx,
     customData: {
       paymasterParams: {
         paymaster: paymasterAddress,
       },
     },
-  });
-
-  await signedTx.wait();
-
-  console.log("Transaction sent with paymaster covering fees:", signedTx.hash);
+  };
+// Sign and send the transaction using the paymaster
+  const signedTx = await sender.sendTransaction(tx);
+await signedTx.wait();
+console.log("Transaction sent with paymaster covering fees:", signedTx.hash);
 }
-
 main().catch((error) => {
   console.error(error);
   process.exitCode = 1;
 });
 ```
+### 6. Compile Your Contracts:
 
+
+```bash
+npx hardhat compile
+```
+### 6.1 Deploy Contracts:
+
+Write your deployment scripts in the scripts or deploy directory.
+Deploy using Hardhat:
+
+```
+npx hardhat run deploy/deploy.ts --network zkSyncTestnet
+```
+### 6.2 Run Tests:
+```
+npx hardhat test
+
+```
 
 > Note: If contracts fail to deploy, double-check the configuration in `hardhat.config.ts` and ensure the zkSync network is correctly set up.
 Verify that all token and contract addresses are correct and match the deployed addresses.
