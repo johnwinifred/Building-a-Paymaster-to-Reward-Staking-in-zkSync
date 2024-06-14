@@ -1,4 +1,4 @@
-![image](https://github.com/johnwinifred/Building-a-Paymaster-to-Reward-Staking-in-zkSync/assets/89465179/4f312323-f6aa-4e84-9f41-c45c236d5702)
+
 ## Building a Paymaster to Reward Staking in zkSync
 ![Multipurpose blue Zoom Background Template - Made with PosterMyWall](https://github.com/johnwinifred/Building-a-Paymaster-to-Reward-Staking-in-zkSync/assets/89465179/8a4f4b7f-5a2a-4007-9893-ca74b2dcb208)
 
